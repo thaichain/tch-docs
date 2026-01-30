@@ -342,6 +342,159 @@ cast call 0xCccCcCCC00000000000000000000000000000000 \
 
 ---
 
+## Phase 5: ถอด/ปิด Validator (Validator Removal)
+
+Tempo รองรับการถอด validators ออกจาก network ได้โดยไม่ต้อง restart chain
+
+### 5.1 Deactivate Validator (Soft Removal)
+
+Deactivate คือการทำให้ validator ไม่สามารถ sign blocks ได้ แต่ยัง sync chain อยู่
+
+```bash
+export PATH="$HOME/.foundry/bin:$PATH"
+
+# Deactivate Validator 2
+cast send 0xCccCcCCC00000000000000000000000000000000 \
+"changeValidatorStatus(address validator, bool active)" \
+"0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc" \
+"false" \
+--private-key ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+-r http://localhost:8545
+
+# Deactivate Validator 3
+cast send 0xCccCcCCC00000000000000000000000000000000 \
+"changeValidatorStatus(address validator, bool active)" \
+"0x90f79bf6eb2c4f870365e785982e1f101e93b906" \
+"false" \
+--private-key ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+-r http://localhost:8545
+```
+
+**สิ่งที่เกิดขึ้น:**
+- Validator จะกลายเป็น **inactive** ใน contract
+- ใน DKG ceremony รอบถัดไป validator จะไม่ได้รับ signing share
+- Validator ยัง sync blocks ได้ (เป็น verifier) แต่ไม่สามารถ propose/sign blocks ได้
+
+### 5.2 Stop Validator Process (Hard Stop)
+
+หลังจาก deactivate แล้ว สามารถ stop process ได้
+
+```bash
+# Stop Validator 2
+ssh root@89.167.25.42 "pkill -9 -f tempo"
+
+# Stop Validator 3  
+ssh root@89.167.21.24 "pkill -9 -f tempo"
+```
+
+**สิ่งที่เกิดขึ้น:**
+- Validator process หยุดทำงาน
+- Node อื่นๆ จะเห็น `connected_peers` ลดลง
+- Block production ยังทำงานปกติ (ถ้าเหลือ signers อยู่)
+
+### 5.3 ผลการทดสอบลด Validators
+
+#### สถานะก่อนหยุด
+
+| Node | สถานะ | บทบาท |
+|------|--------|--------|
+| Validator 1 | ✅ Active | Signer |
+| Validator 2 | ⏸️ Inactive | Verifier |
+| Validator 3 | ⏸️ Inactive | Verifier |
+
+#### ทดสอบ Stop Validator 2 และ 3
+
+```bash
+# Stop both validators
+ssh root@89.167.25.42 "pkill -9 -f tempo"
+ssh root@89.167.21.24 "pkill -9 -f tempo"
+```
+
+#### ผลลัพธ์
+
+| Node | สถานะ | Block Production |
+|------|--------|-----------------|
+| Validator 1 | ✅ Running | ✅ **ยังผลิต blocks ต่อเนื่อง** |
+| Validator 2 | ⛔ Stopped | - |
+| Validator 3 | ⛔ Stopped | - |
+
+**Block ก่อนหยุด:** 4,146  
+**Block หลังหยุด:** 4,399+ (เพิ่มต่อเนื่อง)
+
+**ผลสรุป:** ✅ Network ยังทำงานได้แม้เหลือแค่ 1 validator!
+
+```
+[Logs จาก Validator 1]
+Block added to canonical chain number=4395 peers=0 txs=1
+Block added to canonical chain number=4396 peers=0 txs=1
+Block added to canonical chain number=4397 peers=0 txs=1
+...
+```
+
+สังเกต: `peers=0` แต่ยังผลิต blocks ได้!
+
+### 5.4 ความแตกต่าง: Deactivate vs Stop
+
+| การกระทำ | Validator ใน Contract | Signing Share | Sync | Process |
+|----------|---------------------|---------------|------|---------|
+| **Normal** | Active | ✅ มี | ✅ | Running |
+| **Deactivate** | Inactive | ❌ ไม่มี | ✅ | Running |
+| **Stop** | (ไม่เปลี่ยน) | (ไม่เปลี่ยน) | ❌ | Stopped |
+
+**แนะนำ:** ควร deactivate ก่อนแล้วค่อย stop เพื่อให้ DKG ceremony รู้ว่า validator ออกไปแล้ว
+
+### 5.5 การกลับมาทำงาน (Re-activate)
+
+```bash
+# Activate Validator 2 อีกครั้ง
+cast send 0xCccCcCCC00000000000000000000000000000000 \
+"changeValidatorStatus(address validator, bool active)" \
+"0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc" \
+"true" \
+--private-key <ADMIN_KEY> \
+-r http://localhost:8545
+
+# รอ DKG ceremony (1-2 epochs)
+# Validator จะกลับมาได้รับ signing share และเป็น signer อีกครั้ง
+```
+
+---
+
+## ⚠️ ข้อควรระวังสำคัญ
+
+### Minimum Validators
+
+**ไม่ควรให้เหลือน้อยกว่า 4 validators ใน production!**
+
+| จำนวน Validators | Fault Tolerance | ความปลอดภัย |
+|------------------|----------------|------------|
+| 1 | 0 | ❌ ไม่มีความปลอดภัย |
+| 2 | 0 | ❌ ไม่มีความปลอดภัย |
+| 3 | 0 | ⚠️ เสี่ยง |
+| 4 | 1 | ✅ ปลอดภัย (N3f1) |
+| 7 | 2 | ✅ ปลอดภัย |
+
+### ถ้าเหลือแค่ 1 Validator
+
+**ข้อดี:**
+- ✅ Network ยังทำงานได้
+- ✅ ยังผลิต blocks ต่อเนื่อง
+- ✅ Transactions ยังประมวลผลได้
+
+**ข้อเสีย:**
+- ❌ **No Fault Tolerance** - ถ้า validator ล่ม = network หยุดทันที
+- ❌ **No Security** - สามารถโกงได้ (single point of failure)
+- ❌ **Centralized** - ไม่มี decentralization
+
+**เปรียบเทียบง่ายๆ:**
+```
+เหมือนรถยนต์ที่เหลือแค่ล้อเดียว
+- ยังวิ่งได้ ✅
+- ถ้าล้อแตก = จอดทันที ❌
+```
+
+---
+
 ## สรุป
 
 ✅ **Tempo รองรับ Dynamic Validator Addition:**
